@@ -1,44 +1,68 @@
 (ns clj-snapshot.core
   (:require
-    [taoensso.nippy :as nippy]]))
+    [clojure.java.io :as io]
+    [taoensso.nippy :as nippy])
+  (:import
+    [java.io DataInputStream DataOutputStream]))
 
-(defn foo
-  "I don't do a whole lot."
-  [x]
-  (println x "Hello, World!"))
+(defprotocol SettableState
+  (set-state [this state]))
+
+(defrecord MultiReference [refs]
+  SettableState
+  (set-state
+    [_ states]
+    (dosync
+      (dorun (map set-state refs states))))
+
+  clojure.lang.IDeref
+  (deref
+    [_]
+    (mapv deref refs)))
+
+(prefer-method print-method java.util.Map clojure.lang.IDeref)
+
+(extend-protocol SettableState
+  clojure.lang.Atom
+  (set-state
+    [a state]
+    (reset! a state))
+
+  clojure.lang.Ref
+  (set-state
+    [r state]
+    (dosync (ref-set r state))))
 
 
-#_"
-Keep it really fucking simple
+(defn- read-file
+  [file]
+  (with-open [r (io/input-stream file)]
+    (nippy/thaw-from-in! (DataInputStream. r))))
 
-1 snapshotter per datum (i.e. atom/agent)
-eh but fuck that won't work with refs which need to be consistent... should be snapshotted at same time
-start with atoms for now you twat
-
-actually that will work, you just combine the refs together into a multireference
-
-how to deal with custom records or classes? Nippy! extend-freeze and extend-thaw, easy
-"
-
+(defn- write-file
+  [file freezable]
+  (with-open [o (io/output-stream file)]
+    (nippy/freeze-to-out! (DataOutputStream. o) freezable)))
 
 (defn snapshotter!
   "Creates a new Closeable snapshotter using initial-state or getting its own
   state from the reader-or-file if available"
-  ([{:keys [pool file period]} state]
-    (when (is-there? file)
-      (set-state state (read-file )))
+  ([{:keys [pool file period] :or [period 1000]} state]
+    (when (-> file io/file .canRead)
+      (set-state state (read-file file)))
+    ;; TODO claypoole
     (let [running (atom true)]
       (future
         (while @running
           (Thread/sleep period)
-          (write file (nippy/freeze @state))))
+          (write-file file @state)))
       (reify java.io.Closeable
         (close [_] (reset! running false)))))
-  ([opts & states]
-    (snapshotter! opts (multi-ref states))))
-
-(snapshotter! {} (atom {}))
-
-(defn start-app
-  (let [state (atom {})
-        snapshotter (snapshotter! {:file "snapshot.nip"})]))
+  ([opts state & states]
+    (snapshotter! opts (->MultiReference (cons state states)))))
+;
+; #_(snapshotter! {} (atom {}))
+;
+; #_(defn start-app
+;   (let [state (atom {})
+;         snapshotter (snapshotter! {:file "snapshot.nip"})]))
