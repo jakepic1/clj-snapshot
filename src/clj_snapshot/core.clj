@@ -31,8 +31,12 @@
   clojure.lang.Ref
   (set-state
     [r state]
-    (dosync (ref-set r state))))
+    (dosync (ref-set r state)))
 
+  clojure.lang.Agent
+  (set-state
+    [a state]
+    (send a (constantly state))))
 
 (defn- read-file
   [file]
@@ -46,11 +50,27 @@
 
 (defn snapshotter!
   "Creates a new Closeable snapshotter using initial-state or getting its own
-  state from the reader-or-file if available"
-  ([{:keys [pool file period] :or [period 1000]} state]
+  state from the reader-or-file if available.
+
+  Options:
+  :file - can be a string, file, URI, etc that can be cast to
+    `clojure.java.io functions` `file`, `output-stream`, `input-stream`.
+  :period - Period in ms in which file should be written.
+
+  `state(s)` is/are any type that implements `SettableState` and `IDeref`.
+  Examples are `ref`, `atom`, `agent`.
+
+  The derefed value referenced by the state must be nippy freezable and thawable.
+
+  Use `with-open` or `.close` when using this function to shutdown the snapshot
+  thread.
+
+  Note that `period` is approximate only, and is not a true period but rather
+  a sleep time between writes. Slow disk writes, GC pauses, or other slow tasks
+  means the actual period between snapshots could be much larger."
+  ([{:keys [file period] :or [period 1000]} state]
     (when (-> file io/file .canRead)
       (set-state state (read-file file)))
-    ;; TODO claypoole
     (let [running (atom true)]
       (future
         (while @running
@@ -60,9 +80,3 @@
         (close [_] (reset! running false)))))
   ([opts state & states]
     (snapshotter! opts (->MultiReference (cons state states)))))
-;
-; #_(snapshotter! {} (atom {}))
-;
-; #_(defn start-app
-;   (let [state (atom {})
-;         snapshotter (snapshotter! {:file "snapshot.nip"})]))
